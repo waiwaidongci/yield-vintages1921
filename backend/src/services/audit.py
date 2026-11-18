@@ -1,4 +1,5 @@
-import time
-from src.models.identity import Audit
-def log(db,actor,action,detail):
- db.add(Audit(actor=actor,action=action,detail=str(detail),at=time.time()))
+from src.models.entities import AuditLog
+
+
+def log(db, actor: str, action: str, target: str | None = None, detail: str | None = None):
+    db.add(AuditLog(actor=actor[:120], action=action, target=target, detail=detail))

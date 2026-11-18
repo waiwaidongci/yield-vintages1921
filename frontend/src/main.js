@@ -1,6 +1,119 @@
-import {readPolicy,bindPolicyRows} from './utils/policy.js';import {request,download} from './api/client.js';import {saveSource,savePolicy,submitRun,approveRun} from './api/business.js';import {store,reload,setSession} from './stores/business.js';import {pages,currentPage} from './router/index.js';import {esc} from './utils/format.js';import {action} from './hooks/action.js';import {login} from './pages/login.js';import {overview} from './pages/overview.js';import {sources} from './pages/sources.js';import {policies} from './pages/policies.js';import {runs} from './pages/runs.js';import {deliveries} from './pages/deliveries.js';import {audit} from './pages/audit.js';
-const c=await (await fetch('/project.json')).json(),app=document.querySelector('#app');let busy=false;
-const renderers={overview,sources,policies,runs,deliveries,audit};
-function render(){if(!store.session){app.innerHTML=login(c)+'<div id="notice" role="status"></div>';document.querySelector('#login').onsubmit=e=>{e.preventDefault();action(async()=>{const b=Object.fromEntries(new FormData(e.target));setSession(await request('/auth/login','POST',b));await reload();render()})};return}const page=currentPage();app.innerHTML=`<div class="shell"><aside class="sidebar"><a href="#overview" class="brand">${esc(c.title.slice(0,2))}<small>业务研究底稿<br>${esc(c.slug)}</small></a><nav>${pages.map(([id,title],i)=>`<a class="${page===id?'active':''}" href="#${id}"><span>0${i+1}</span>${title}</a>`).join('')}</nav><footer>${esc(store.session.email)}<br><b>${esc(store.session.role)}</b><br><button id="logout">退出</button></footer></aside><main class="workspace"><div class="topline"><span>${esc(c.title)}</span><button id="refresh">刷新数据</button></div><div id="notice" role="status"></div>${(renderers[page]||overview)(c,store.data,store.selected)}</main></div>`;bind()}
-function bind(){bindPolicyRows();document.querySelector('#logout').onclick=()=>{setSession(null);render()};document.querySelector('#refresh').onclick=()=>action(async()=>{await reload();render()});const sf=document.querySelector('#source-form');if(sf)sf.onsubmit=e=>{e.preventDefault();action(async()=>{const b=Object.fromEntries(new FormData(sf)),id=b.id;delete b.id;for(const k of Object.keys(b)){if(typeof c.example[k]==='number')b[k]=Number(b[k]);else if(typeof c.example[k]==='object')b[k]=JSON.parse(b[k])}await saveSource(b,id);await reload();render()})};const pf=document.querySelector('#policy-form');if(pf)pf.onsubmit=e=>{e.preventDefault();action(async()=>{await savePolicy(readPolicy(pf,c));await reload();render()})};const rf=document.querySelector('#run-form');if(rf)rf.onsubmit=e=>{e.preventDefault();action(async()=>{const b=Object.fromEntries(new FormData(rf));b.policy_id=Number(b.policy_id);store.selected=(await submitRun(b)).id;await reload();render()})};document.querySelectorAll('.select-run').forEach(b=>b.onclick=()=>{store.selected=Number(b.dataset.id);render()});const ex=document.querySelector('#export');if(ex)ex.onclick=()=>action(()=>download('/runs/'+ex.dataset.id+'/csv'));const af=document.querySelector('#approve');if(af)af.onsubmit=e=>{e.preventDefault();action(async()=>{await approveRun(af.dataset.id,new FormData(af).get('note'));await reload();render()})};const df=document.querySelector('#schedule-form');if(df)df.onsubmit=e=>{e.preventDefault();action(async()=>{const b=Object.fromEntries(new FormData(df));b.run_id=Number(b.run_id);b.interval_seconds=Number(b.interval_seconds);await request('/schedules','POST',b);await reload();render()})};document.querySelectorAll('.toggle').forEach(b=>b.onclick=()=>action(async()=>{await request('/schedules/'+b.dataset.id+'/toggle','POST',{});await reload();render()}));document.querySelectorAll('.delivery-export').forEach(b=>b.onclick=()=>action(()=>download('/deliveries/'+b.dataset.id+'/csv')))}
-window.addEventListener('hashchange',render);try{if(store.session)await reload()}catch(e){setSession(null)}render();setInterval(async()=>{if(store.session&&!busy&&store.data.runs.some(r=>['queued','running'].includes(r.status))){busy=true;try{await reload();render()}finally{busy=false}}},2000);
+import {request, upload} from './api/client.js';
+import {store, reload} from './stores/business.js';
+import {pages, currentPage} from './router/index.js';
+import {esc} from './utils/format.js';
+import {action} from './hooks/action.js';
+import {overview} from './pages/overview.js';
+import {devices} from './pages/devices.js';
+import {importPage} from './pages/import.js';
+import {yields} from './pages/yields.js';
+import {pending} from './pages/pending.js';
+import {audit} from './pages/audit.js';
+
+const c = await (await fetch('/project.json')).json();
+const app = document.querySelector('#app');
+const renderers = {overview, devices, import: importPage, yields, pending, audit};
+let timer = null;
+
+function render() {
+  const page = currentPage();
+  app.innerHTML = `<div class="shell"><aside class="sidebar">
+    <a href="#overview" class="brand">${esc(c.title.slice(0, 2))}<small>设备累计读数<br>差额还原计件</small></a>
+    <nav>${pages.map(([id, title], i) =>
+      `<a class="${page === id ? 'active' : ''}" href="#${id}"><span>0${i + 1}</span>${esc(title)}</a>`).join('')}</nav>
+    <footer>砚泉车间计件台<br><b>只读/录入一体化</b><br><button id="refresh">刷新数据</button></footer>
+  </aside><main class="workspace">
+    <div class="topline"><span>${esc(c.title)}</span><span id="queue-pill"></span></div>
+    <div id="notice" role="status"></div>
+    ${(renderers[page] || overview)(c, store.data)}
+  </main></div>`;
+  bind();
+}
+
+function notice(msg, isError) {
+  const box = document.querySelector('#notice');
+  box.textContent = msg;
+  box.classList.toggle('error', !!isError);
+}
+
+function bind() {
+  document.querySelector('#refresh').onclick = () => action(async () => { await reload(); render(); });
+  const pill = document.querySelector('#queue-pill');
+  if (pill) pill.textContent = `队列待处理 ${store.data.queue?.depth ?? 0}`;
+
+  const select = document.querySelector('#device-select');
+  if (select) {
+    select.value = store.selectedDevice;
+    select.onchange = () => action(async () => { store.selectedDevice = select.value; await reload(); render(); });
+  }
+  const recover = document.querySelector('#recover-btn');
+  if (recover) recover.onclick = () => action(async () => {
+    const r = await request('/imports/recover', 'POST', {});
+    await reload(); render();
+    notice(`已恢复批次：${r.recovered_batch_ids.join(', ') || '无中断批次'}`);
+  });
+
+  const df = document.querySelector('#device-form');
+  if (df) df.onsubmit = e => {
+    e.preventDefault();
+    action(async () => {
+      const b = Object.fromEntries(new FormData(df));
+      await request('/devices', 'POST', {
+        code: b.code.trim(), name: b.name.trim(),
+        counter_capacity: Number(b.counter_capacity),
+        max_rate_per_sec: Number(b.max_rate_per_sec),
+      });
+      await reload(); render();
+    });
+  };
+
+  const df2 = document.querySelector('#import-json-form');
+  const fillKey = document.querySelector('#fill-key');
+  if (fillKey) fillKey.onclick = () => {
+    df2.idempotency_key.value = 'ui-' + crypto.randomUUID().slice(0, 12);
+  };
+  if (df2) df2.onsubmit = e => {
+    e.preventDefault();
+    action(async () => {
+      const b = Object.fromEntries(new FormData(df2));
+      const reading = {
+        read_at: b.read_at.length === 16 ? b.read_at + ':00' : b.read_at,
+        total_input: Number(b.total_input),
+        total_good: Number(b.total_good),
+        meter_changed: !!b.meter_changed,
+        handover_input: b.handover_input === '' ? null : Number(b.handover_input),
+        handover_good: b.handover_good === '' ? null : Number(b.handover_good),
+      };
+      const payload = {
+        idempotency_key: b.idempotency_key.trim(),
+        device_code: b.device_code.trim(),
+        readings: [reading],
+      };
+      const r = await request(`/readings/import?async_mode=${!!b.async_mode}`, 'POST', payload);
+      await reload(); render();
+      notice(`批次 #${r.id} 状态：${r.status === 'completed' ? '已完成并切换' : '已入队'}`);
+    });
+  };
+
+  const cf = document.querySelector('#import-csv-form');
+  if (cf) cf.onsubmit = e => {
+    e.preventDefault();
+    action(async () => {
+      const fd = new FormData(cf);
+      const asyncMode = fd.get('async_mode');
+      fd.delete('async_mode');
+      const r = await upload(`/readings/import-csv?async_mode=${!!asyncMode}`, fd);
+      await reload(); render();
+      notice(`CSV 批次 #${r.id} 状态：${r.status === 'completed' ? '已完成并切换' : '已入队'}`);
+    });
+  };
+}
+
+window.addEventListener('hashchange', render);
+await reload();
+render();
+// 轮询：存在核算中批次或队列任务时自动刷新
+timer = setInterval(async () => {
+  const busy = (store.data.imports || []).some(b => b.status === 'processing') || (store.data.queue?.depth ?? 0) > 0;
+  if (busy) { try { await reload(); render(); } catch { /* 忽略瞬时失败 */ } }
+}, 2500);

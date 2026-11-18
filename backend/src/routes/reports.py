@@ -1,27 +1,47 @@
-from fastapi import APIRouter,Depends,HTTPException
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends
+
 from src.config.database import database
-from src.controllers.auth import current,editor,admin
-from src.models.run import Run
-from src.schemas.requests import RunInput,ReviewInput
-from src.services.report import submit,approve
-from src.services.export import csv_text
+from src.models.entities import MeterReading
+from src.services.report import list_intervals, pending_intervals, shift_yields, overview
 from src.utils.serialize import row
-router=APIRouter()
-@router.get('/runs')
-def runs(db=Depends(database),u=Depends(current)): return [row(x) for x in db.query(Run).order_by(Run.id.desc()).all()]
-@router.post('/runs')
-def create(b:RunInput,db=Depends(database),u=Depends(editor)): return row(submit(db,u,b))
-@router.get('/runs/{id}')
-def detail(id:int,db=Depends(database),u=Depends(current)):
- obj=db.get(Run,id)
- if not obj: raise HTTPException(404,'报告不存在')
- return row(obj)
-@router.post('/runs/{id}/approve')
-def review(id:int,b:ReviewInput,db=Depends(database),u=Depends(admin)): return row(approve(db,u,id,b.note))
-@router.get('/runs/{id}/csv')
-def download(id:int,db=Depends(database),u=Depends(current)):
- obj=db.get(Run,id)
- if not obj or obj.status!='completed': raise HTTPException(409,'报告尚未完成')
- if u.role=='viewer' and not obj.approved: raise HTTPException(403,'业务阅读者仅可下载已复核报告')
- return Response(csv_text(obj.result),media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="report-{id}.csv"'})
+
+router = APIRouter(tags=['核算查询'])
+
+
+@router.get('/overview')
+def get_overview(db=Depends(database)):
+    return overview(db)
+
+
+@router.get('/readings')
+def get_readings(device_code: str | None = None, db=Depends(database)):
+    from src.models.entities import Device
+    q = db.query(MeterReading)
+    if device_code:
+        device = db.query(Device).filter_by(code=device_code).first()
+        if not device:
+            return []
+        q = q.filter_by(device_id=device.id)
+    items = q.order_by(MeterReading.device_id, MeterReading.read_at).all()
+    out = []
+    for r in items:
+        data = row(r)
+        device = db.get(Device, r.device_id)
+        data['device_code'] = device.code if device else None
+        out.append(data)
+    return out
+
+
+@router.get('/intervals')
+def get_intervals(device_code: str | None = None, status: str | None = None, db=Depends(database)):
+    return list_intervals(db, device_code, status)
+
+
+@router.get('/intervals/pending')
+def get_pending(device_code: str | None = None, db=Depends(database)):
+    return pending_intervals(db, device_code)
+
+
+@router.get('/shift-yields')
+def get_shift_yields(device_code: str | None = None, db=Depends(database)):
+    return shift_yields(db, device_code)

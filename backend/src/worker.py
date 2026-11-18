@@ -1,26 +1,35 @@
-import time,json,traceback
+"""worker：启动恢复中断批次，随后消费导入队列。"""
+import logging
+import time
 from pathlib import Path
-import redis
-from src.config.database import Base,engine,Session
-from src.config.settings import REDIS_URL
-from src.models import identity,source,run
-from src.models.run import Run
-from src.services.calculation import calculate
-from src.services.delivery import tick
-Base.metadata.create_all(engine)
-r=redis.Redis.from_url(REDIS_URL)
-while True:
- Path('/tmp/worker-heartbeat').write_text(str(time.time()))
- try:
-  item=r.lpop('report-jobs')
-  if item:
-   with Session() as db:
-    job=db.get(Run,int(item))
-    if job and job.status=='queued':
-     job.status='running';db.commit()
-     try: job.result=calculate(job.snapshot['sources'],job.snapshot['policy']);job.status='completed'
-     except Exception as exc: job.status='failed';job.error=str(exc);traceback.print_exc()
-     db.commit()
-  with Session() as db: tick(db)
- except Exception: traceback.print_exc()
- time.sleep(1)
+
+from src.config.database import Session
+from src.config.settings import HEARTBEAT_FILE
+from src.services import queue
+from src.services.importer import process_batch, recover_stale_batches
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format='[worker] %(asctime)s %(message)s')
+    heartbeat = Path(HEARTBEAT_FILE)
+    logging.info('启动：先恢复中断的导入批次')
+    with Session() as db:
+        recovered = recover_stale_batches(db)
+    if recovered:
+        logging.info('已恢复批次 %s', recovered)
+
+    while True:
+        heartbeat.write_text(str(time.time()))
+        job = queue.dequeue_job(timeout=5)
+        if not job:
+            continue
+        batch_id = int(job)
+        try:
+            batch = process_batch(batch_id)  # 内部独立事务，失败落 failed 不拖垮 worker
+            logging.info('批次 %s 完成状态=%s', batch_id, batch.status)
+        except Exception:
+            logging.exception('批次 %s 处理失败，已落 failed 状态，可同键重试', batch_id)
+
+
+if __name__ == '__main__':
+    main()

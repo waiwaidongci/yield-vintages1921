@@ -1,54 +1,81 @@
-# 砚泉试制良率口径簿
+# 车间累计读数差额计件台
 
-试制批次一次通过/返工/报废→冻结口径版本与加权透视→主管复核交付；历史快照不随口径改写
+设备只上报**累计投入**与**累计合格**两个计数器。系统导入带时点读数，按各设备的**计数上限**与**最大产速**还原相邻读数之间的差额；回卷存在多个解、缺换表交接、跨班缺边界读数的区间**暂不计件**，进入待确认并登记原因。
 
-## 业务场景与工作流
-模拟客户：砚泉研究协作组，12位业务与分析人员。每月研究明细先从`yield-vintages-202611.csv`录入底稿，经口径冻结、Python核算、负责人复核后向业务阅读者交付站内CSV。原有流程依靠人工表格抄算，痛点为口径版本难追溯、重复计算易错、复核与交付脱节。
+## 业务规则与核算口径
 
-模块：业务总览、业务底稿、新建口径版本、异步核算与复核、定时交付、站内收件箱、审计。底稿可新增/修改/删除；口径仅新增版本；报告提交时冻结来源与版本并保存SHA256。定时交付引用已复核报告快照，worker到期写入数据库，业务阅读者下载。
+### 1. 差额还原（`backend/src/services/intervals.py`）
+- **单调读数**：差额 = 后值 − 前值，回卷次数 0。
+- **回卷（读数倒退）**：计数器在 `counter_capacity` 处归零，候选解 `delta = 后值 − 前值 + k×capacity（k≥1）`。
+  以 `最大产速 × 区间秒数` 为产能上限裁剪候选：
+  - 恰好一个可行解 → 按该解计件；
+  - 多个可行解（回卷多解）→ `rewind_ambiguous` 待确认；
+  - 零个可行解（全部超产能）→ `rate_exceeded` 待确认。
+- **换表**：换表后首读数带 `meter_changed` 与旧表交接值；差额 =（旧表交接 − 前读数）+ 新表初读数。缺交接或交接值非法 → `missing_handover` 待确认。
+- **跨班边界**：区间内部经过班次边界时刻、而边界时刻没有读数 → `missing_boundary` 待确认；边界恰好有读数时自然拆成两段、各自归班。
+- 同刻多值、合格大于投入等异常 → `bad_interval` 待确认。
+- 待确认原因判定优先级：bad_interval > missing_handover > rewind_ambiguous > rate_exceeded > missing_boundary。
 
-## 算法口径
-版本化良率分母规则、加权汇总与按线/班次差异归因。分母规则手算；大批小批汇总不能均值；更新规则旧run不变。
+### 2. 范围重建与一次性切换
+- 每次导入按设备找到**最早新读数的前一条锚点读数**，仅撤销锚点之后的旧区间并重算；更早区间不受影响（“并发补读只重算受影响的前后区间”）。
+- 读数入库、旧差额撤销、新差额落账、批次状态在**同一数据库事务**提交，提交前外部读到的始终是上一版结果；班次良率由 confirmed 区间实时汇总，随之一次性切换。
 
-口径版本冻结 · 汇总按分母加权。输入：业务底稿与口径JSON；输出：summary、透视rows、method、warnings。算法实现在`backend/src/services/calculation.py`，输入校验在`validation.py`。固定seed=42，240条合成数据；未对接真实业务系统。修改源数据和新建因子/口径不会改变已提交报告。
+### 3. 幂等、异步与中断恢复
+- 每个导入批次带 `idempotency_key`（数据库唯一）：同批补读重试直接返回已完成批次，**不重复入账**。
+- 批次先落 `processing` 与原始 payload，再核算。异步模式经 Redis 队列（无 Redis 时降级内存队列）交 worker 消费。
+- 进程崩溃后，worker 启动与后端启动钩子都会 `recover_stale_batches`，按 payload 重放所有停留 `processing` 的批次；失败批次落 `failed` 并整笔回滚业务写入，同键修正后可重试。
 
-## 一天的验收剧本
-1. 09:00 admin查看240条seed底稿与具名业务期间。
-2. 09:10 analyst添加`yield-vintages-202611.csv`的一条具名业务记录。
-3. 09:20 admin在口径版本页登记新版本；旧版本保留。
-4. 09:30 analyst命名“十一月核算”并选择期间/版本排队。
-5. 09:31 Redis worker真实执行Python计算，展示汇总/透视与口径边界。
-6. 09:40 admin核对数值后填写至少4字复核说明。
-7. 09:45 admin建立60秒周期计划，worker到期生成站内持久化交付。
-8. 09:46 viewer在站内收件箱下载交付CSV；审计页查看操作者与时间。
+### 4. 班次良率
+按 设备 × 日历日 × 班次 汇总：`良率 = Σ合格差额 ÷ Σ投入差额`，**只统计 confirmed 区间**；pending 区间不计入分子分母，仅计数并在待确认页展示原因文案。
 
 ## 快速启动
+
 ```sh
 cp .env.example .env
 docker compose up -d --build
 docker compose exec -T backend python -m scripts.seed_demo
 ```
-前端 http://localhost:18253 ，后端 http://localhost:19253/docs ，数据库宿主端口17753。中文父目录可用。恰好5服务frontend/backend/worker/db/redis；均有真实healthcheck。停止并清空演示数据：`docker compose down -v --remove-orphans`。
+前端 http://localhost:18253 ，后端文档 http://localhost:19253/docs ，MySQL 宿主端口 17753。五服务 frontend/backend/worker/db/redis，均带真实 healthcheck。清空演示数据：`docker compose down -v --remove-orphans`。
 
-|角色|邮箱|密码|权限|
-|---|---|---|---|
-|admin|admin@demo.local|Demo2026!|全部底稿、口径版本、核算、复核、调度|
-|analyst|analyst@demo.local|Demo2026!|底稿增改删、核算、导出；无复核/调度/口径写权限|
-|viewer|viewer@demo.local|Demo2026!|只读；仅可下载已复核报告与站内交付|
+本地无 Docker 时（SQLite + 内存队列）：
 
-## 工程结构与开发
-Python3.11/FastAPI/SQLAlchemy/Redis，MySQL8；前端原生HTML/CSS/JS ES modules，Nginx代理`/api/`剥前缀至后端。`frontend/src`按api/stores/pages/components/hooks/utils/router/constants/types拆分；`backend/src`按models/schemas/services/controllers/routes/middlewares/config/utils/constants拆分；`backend/scripts/seed_demo.py`自然键幂等且不覆盖用户修改。SQLAlchemy启动创建初始结构，迁移说明在backend/migrations。
+```sh
+cd backend
+python -m pip install -r requirements-dev.txt
+SEED_DEMO=true PYTHONPATH=. python -m scripts.seed_demo
+PYTHONPATH=. uvicorn src.main:app --port 19253      # 后端
+PYTHONPATH=. python -m src.worker                    # 另一终端：worker
+cd ../frontend && node dev-server.cjs               # 静态服务 + /api 代理 → :18080
+```
 
-后端开发：在backend安装requirements，设置DATABASE_URL/REDIS_URL/JWT_SECRET，`uvicorn src.main:app --reload`；前端可用Nginx或带同等代理的静态开发服务器。前后端全部业务计算在Python。
+## 页面与 API
 
-环境变量：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET（部署替换）、DATABASE_URL、REDIS_URL、SEED_DEMO。`.env`不入Git。数据库/Redis/共享产物为命名卷。共享角色枚举admin/analyst/viewer与状态queued/running/completed/failed分别定义于backend/src/constants/enums.py和frontend/src/constants/enums.js。两个中间件：统一可恢复校验错误、每IP每分钟360请求限流。
+页面（原生 ES modules，无构建）：业务总览、设备台账、读数导入（JSON 单条/批量 + 中文表头 CSV）、班次良率、待确认区间（含原因）、过程留痕。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET/POST | `/devices` | 设备台账；登记计数上限、最大产速、班次 |
+| POST | `/readings/import` | JSON 导入，`?async_mode=true` 走队列 |
+| POST | `/readings/import-csv` | CSV 导入（multipart） |
+| GET | `/readings` `/intervals` `/intervals/pending` | 读数与区间查询，可按 `device_code` 过滤 |
+| GET | `/shift-yields` | 班次良率（pending 不计件） |
+| GET | `/imports` `/imports/{id}` | 批次状态与错误 |
+| POST | `/imports/recover` | 手动触发中断恢复（启动时也自动执行） |
+| GET | `/audits` `/overview` `/health` | 留痕、总览、健康检查 |
+
+CSV 表头（中英文均可）：`设备编码,时点,累计投入,累计合格,换表,交接投入,交接合格`。
+
+## 工程结构
+
+- `backend/src/services/intervals.py` 差额还原纯算法（可独立单测）；`shifts.py` 班次窗口；`importer.py` 批次登记、范围重建、恢复；`queue.py` Redis/内存队列；`report.py` 良率汇总。
+- 表：`devices`、`meter_readings`、`output_intervals`、`import_batches`、`audit_logs`（见 `backend/migrations/001_schema.md`）。
+- 测试：`backend/tests`，23 个用例覆盖回卷单解/多解、换表、跨班、超速、范围重建、幂等重试、失败回滚、崩溃恢复、并发补读、队列与 HTTP API。运行：`cd backend && python -m pytest tests/ -q`。
+- 时间按 Asia/Shanghai 朴素值存储与展示；前端 `frontend/dev-server.cjs` 仅用于本地联调，生产用 nginx 配置。
 
 ## 已知边界
-定时分发为站内收件箱；一名worker轮询执行，无外部邮件。调度发送已复核固定报告快照，不自动重算新数据。时间显示Asia/Shanghai。报告导出适合小型数据；底稿全量加载240行演示数据。Google Fonts不可用时回退serif。后端API以专属字段对象收发，页面通过业务输入控件编辑，不要求用户写JSON。新增来源期间自动可选；专属字段和算法严格校验。JWT演示有效期2小时。
+
+- 单 worker 消费队列；同设备并发补读靠数据库行锁（`SELECT … FOR UPDATE`，MySQL 生效；SQLite 降级为库级写锁）串行化。
+- 计数器回卷默认按整数圈处理；设备首条读数之前没有区间。
+- 班次窗口随设备 JSON 配置，页面暂只提供默认三班（早/中/晚）。
 
 MIT License。
-
-## 实际实体映射
-来源记录（Source，专属业务字段校验）、口径版本（Policy）、核算报告（Run）、交付计划（Schedule）、交付（Delivery）均经数据库→模型→请求schema→service→route/controller→frontend API→store→page。Period为已有来源期间字典，在任务期间选择器使用；不单独作为复杂度计数。底稿JSON为小型多字段单记录存储，不虚构未落库的子实体。
-
-实际表：期间字典 yield_periods；专属来源 yield_lots；冻结口径 denominator_policies；异步报告 yield_runs。

@@ -4,3 +4,24 @@
 .page-heading{border-bottom:4px double var(--accent);padding-bottom:20px}.sidebar{background:var(--paper);color:var(--ink);border-right:3px double var(--ink)}.sidebar nav a{border-color:var(--line)}.sidebar nav .active{color:var(--accent)}.sidebar footer button{border-color:var(--ink)}.report{border-top:5px solid var(--accent)}.metrics{gap:0;border-block:1px solid var(--accent)}.metrics>div{border-left:0;border-right:1px solid var(--line);padding:20px}.overview-count b{font-family:'Noto Serif SC',serif}.login-story{border-bottom:20px solid var(--accent)}.status.completed{border:1px solid var(--accent);transform:rotate(-2deg)}
 
 .policy-row{display:flex;flex-wrap:wrap;gap:15px;align-items:end;border-bottom:1px solid var(--line);padding:12px 0}.policy-row label{flex:1;min-width:140px}.policy-row button{font-size:11px;margin-bottom:14px;background:transparent;color:var(--ink)}#add-policy-row{background:transparent;color:var(--accent);border-color:var(--accent);margin:15px 0 25px}fieldset{border:1px solid var(--line);margin:20px 0}.weekday{display:inline-flex;align-items:center;margin:10px}.weekday input{width:auto;margin:0 6px 0 0}input[type=number]{appearance:textfield}
+
+/* 读数计件台：待确认原因印章与批次状态 */
+.rule-note{font-size:12px;color:var(--muted);line-height:1.8}
+.overview-counts{display:grid;gap:18px;align-content:start}
+.overview-count .overview-count{border-top:5px solid var(--accent);padding-top:14px}
+#queue-pill{font-size:11px;color:var(--muted);border:1px solid var(--line);padding:5px 10px}
+.status.processing{border:1px solid var(--line);color:var(--muted)}
+.status.completed{border:1px solid var(--accent)}
+.status.failed{color:oklch(.5 .18 25);border:1px solid currentColor}
+.status.pending{color:oklch(.5 .18 25);border:1px solid currentColor;transform:rotate(-2deg);display:inline-block}
+tr.batch-processing td{background:color-mix(in oklch,var(--accent) 5%,transparent)}
+tr.batch-failed td{background:color-mix(in oklch,oklch(.5 .18 25) 7%,transparent)}
+tr.row-pending td{color:var(--muted)}
+.reason-tag{display:inline-block;font-size:10px;letter-spacing:.05em;padding:4px 8px;border:1px solid var(--accent);white-space:nowrap}
+.reason-ambiguous{border-color:oklch(.55 .16 30)}
+.reason-rate{border-color:oklch(.5 .17 55)}
+.reason-handover{border-color:oklch(.45 .12 250)}
+.reason-boundary{border-color:oklch(.45 .1 180)}
+.reason-bad{border-color:oklch(.45 .16 0)}
+small{font-size:10px;color:var(--muted)}
+input[type=file]{padding:8px;border:1px dashed var(--line)}
